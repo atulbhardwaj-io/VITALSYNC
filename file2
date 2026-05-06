@@ -1,0 +1,158 @@
+# ==============================================================================
+# VITALSYNC: AUTONOMOUS MORPHOLOGICAL NUMBER TRACKING
+# ==============================================================================
+import cv2
+import time
+import numpy as np
+
+print("Initiating Morphological Number Hunter on Port 0...")
+
+cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+
+if not cap.isOpened():
+    print("❌ ERROR: Cannot open Port 0. Restart Kernel.")
+else:
+    print("✅ Hardware Locked. Launching Number Tracking Dashboard...")
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    
+    window_name = "VitalSync Number Tracking Node"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+    prev_gray = None
+    last_beat_time = time.time()
+    calculated_bpm = 0
+    bpm_history = [75] * 100 
+    motion_threshold = 3000   
+
+    while True:
+        ret, frame = cap.read()
+        if not ret: continue
+
+        h, w = frame.shape[:2]
+        gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # --- 1. MORPHOLOGICAL NUMBER DETECTION (THE UPGRADE) ---
+        # Isolate the bright pixels (the glowing numbers on the dark monitor)
+        _, thresh_full = cv2.threshold(gray_full, 150, 255, cv2.THRESH_BINARY)
+        
+        # Create a rectangular "smearing" kernel
+        # This mathematically forces individual digits (like '8' and '6') to melt together 
+        # horizontally into a single solid white block of text.
+        rect_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 5))
+        smeared_text = cv2.morphologyEx(thresh_full, cv2.MORPH_CLOSE, rect_kernel)
+        
+        # Find the boundaries of these smeared text blocks
+        contours, _ = cv2.findContours(smeared_text, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        cx, cy = int(w/2), int(h/2) # Default center
+        target_locked = False
+        
+        # Filter the shapes to find the one that matches a 2-3 digit medical number
+        for c in contours:
+            x_box, y_box, bw, bh = cv2.boundingRect(c)
+            aspect_ratio = bw / float(bh)
+            area = bw * bh
+            
+            # A block of 2-3 numbers is usually wider than it is tall (aspect ratio 1.2 to 3.5)
+            # and big enough to not just be random background static (area > 800)
+            if 800 < area < 15000 and 1.2 < aspect_ratio < 3.5:
+                # WE FOUND THE NUMBERS! Calculate the exact center point.
+                cx = x_box + (bw // 2)
+                cy = y_box + (bh // 2)
+                target_locked = True
+                break # Lock onto the first valid number block we find
+
+        # Clamp coordinates to prevent array crashing
+        cx = max(150, min(w - 150, cx))
+        cy = max(75, min(h - 75, cy))
+
+        # --- 2. DYNAMIC EXTRACTION ZONE (Centered directly on the numbers) ---
+        crop_roi = frame[cy-75 : cy+75, cx-150 : cx+150]
+        gray_roi = cv2.cvtColor(crop_roi, cv2.COLOR_BGR2GRAY)
+        
+        _, thresh_roi = cv2.threshold(gray_roi, 100, 255, cv2.THRESH_BINARY_INV)
+        thresh_color = cv2.cvtColor(thresh_roi, cv2.COLOR_GRAY2BGR)
+
+        # --- 3. OPTICAL MOTION DETECTION ---
+        if prev_gray is not None:
+            diff = cv2.absdiff(prev_gray, gray_roi)
+            _, diff_thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+            motion_score = np.sum(diff_thresh)
+            
+            current_time = time.time()
+            time_since_last_beat = current_time - last_beat_time
+            
+            if motion_score > motion_threshold and time_since_last_beat > 0.33:
+                instant_bpm = 60.0 / time_since_last_beat
+                if 40 <= instant_bpm <= 180:
+                    calculated_bpm = int(instant_bpm)
+                last_beat_time = current_time
+
+        prev_gray = gray_roi.copy()
+
+        if calculated_bpm > 0:
+            bpm_history.append(calculated_bpm)
+            bpm_history.pop(0)
+
+        # --- 4. DASHBOARD RENDERING ---
+        dashboard = np.zeros((600, 1024, 3), dtype=np.uint8)
+
+        # Header
+        cv2.rectangle(dashboard, (0, 0), (1024, 60), (30, 30, 30), -1)
+        cv2.putText(dashboard, "VITALSYNC: MORPHOLOGICAL NUMBER TRACKING", (20, 40), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+
+        # Left Context View
+        main_disp = cv2.resize(frame, (640, 360))
+        scaled_cx, scaled_cy = int(cx * 0.5), int(cy * 0.5)
+        
+        box_color = (0, 255, 255) if target_locked else (0, 0, 255) # Yellow if locked on numbers
+        cv2.rectangle(main_disp, (scaled_cx-75, scaled_cy-37), (scaled_cx+75, scaled_cy+37), box_color, 2)
+        cv2.drawMarker(main_disp, (scaled_cx, scaled_cy), box_color, cv2.MARKER_CROSS, 15, 1)
+        
+        status_text = "[ NUMBERS DETECTED ]" if target_locked else "[ SCANNING FOR TYPOGRAPHY ]"
+        cv2.putText(main_disp, status_text, (scaled_cx-70, scaled_cy-45), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, box_color, 1)
+
+        dashboard[100:460, 20:660] = main_disp
+        
+        # Right Side Data
+        dashboard[100:250, 700:1000] = crop_roi
+        cv2.putText(dashboard, "LAYER 1: TARGETED ROI", (700, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+        dashboard[280:430, 700:1000] = thresh_color
+        cv2.putText(dashboard, "LAYER 2: GLARE SUPPRESSION", (700, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+        # Live Graph
+        cv2.putText(dashboard, "LAYER 3: TELEMETRY CALCULATION", (700, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        
+        graph_width = 300
+        graph_height = 100
+        cv2.rectangle(dashboard, (700, 470), (700 + graph_width, 470 + graph_height), (20, 20, 20), -1)
+        
+        points = []
+        for i, val in enumerate(bpm_history):
+            x = 700 + int((i / 100) * graph_width)
+            y = 470 + graph_height - int(((val - 40) / 140) * graph_height) 
+            points.append((x, y))
+            
+        for i in range(1, len(points)):
+            cv2.line(dashboard, points[i-1], points[i], (0, 255, 0), 2)
+            
+        if calculated_bpm > 0:
+            cv2.putText(dashboard, f"{calculated_bpm}", (920, 560), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
+            cv2.putText(dashboard, "BPM", (930, 580), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        else:
+            cv2.putText(dashboard, "CALC", (920, 550), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 165, 255), 2)
+
+        cv2.imshow(window_name, dashboard)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
