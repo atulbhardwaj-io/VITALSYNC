@@ -1,0 +1,155 @@
+# ==============================================================================
+# VITALSYNC: OPTICAL EXTRACTION WITH AUTONOMOUS TARGET TRACKING
+# ==============================================================================
+import cv2
+import time
+import numpy as np
+
+print("Initiating Auto-Aim Optical Pulse Tracking on Port 0...")
+
+cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+
+if not cap.isOpened():
+    print("❌ ERROR: Cannot open Port 0. Restart Kernel.")
+else:
+    print("✅ Hardware Locked. Launching Tracking Dashboard...")
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    
+    window_name = "VitalSync Auto-Tracking Node"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+    # Tracking Variables
+    prev_gray = None
+    last_beat_time = time.time()
+    calculated_bpm = 0
+    bpm_history = [75] * 100 
+    motion_threshold = 5000   
+
+    while True:
+        ret, frame = cap.read()
+        if not ret: continue
+
+        h, w = frame.shape[:2]
+        
+        # --- 1. AUTONOMOUS TARGET ACQUISITION (THE NEW AUTO-AIM) ---
+        gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # Look for the brightest glowing object in the room (the phone screen)
+        # We lower the threshold slightly to catch screens even at an angle
+        _, bright_mask = cv2.threshold(gray_full, 180, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Default fallback coordinates (Center of screen) if no phone is found
+        cx, cy = int(w/2), int(h/2)
+        target_locked = False
+        
+        if contours:
+            # Find the largest bright object
+            largest_contour = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(largest_contour) > 2000: # Ensure it's big enough to be a phone
+                M = cv2.moments(largest_contour)
+                if M['m00'] != 0:
+                    # Calculate exact center of the phone
+                    cx = int(M['m10']/M['m00'])
+                    cy = int(M['m01']/M['m00'])
+                    target_locked = True
+
+        # Clamp coordinates so the crop box never hits the wall and crashes the array
+        cx = max(150, min(w - 150, cx))
+        cy = max(75, min(h - 75, cy))
+
+        # --- 2. DYNAMIC EXTRACTION ZONE ---
+        # The crop now dynamically builds around (cx, cy) instead of the hardcoded center!
+        crop_roi = frame[cy-75 : cy+75, cx-150 : cx+150]
+        gray_roi = cv2.cvtColor(crop_roi, cv2.COLOR_BGR2GRAY)
+        
+        _, thresh_roi = cv2.threshold(gray_roi, 100, 255, cv2.THRESH_BINARY_INV)
+        thresh_color = cv2.cvtColor(thresh_roi, cv2.COLOR_GRAY2BGR)
+
+        # --- 3. OPTICAL BEAT DETECTION ---
+        if prev_gray is not None:
+            diff = cv2.absdiff(prev_gray, gray_roi)
+            _, diff_thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+            motion_score = np.sum(diff_thresh)
+            
+            current_time = time.time()
+            time_since_last_beat = current_time - last_beat_time
+            
+            if motion_score > motion_threshold and time_since_last_beat > 0.33:
+                instant_bpm = 60.0 / time_since_last_beat
+                if 40 <= instant_bpm <= 180:
+                    calculated_bpm = int(instant_bpm)
+                last_beat_time = current_time
+
+        prev_gray = gray_roi.copy()
+
+        if calculated_bpm > 0:
+            bpm_history.append(calculated_bpm)
+            bpm_history.pop(0)
+
+        # --- 4. DASHBOARD RENDERING ---
+        dashboard = np.zeros((600, 1024, 3), dtype=np.uint8)
+
+        # Header
+        cv2.rectangle(dashboard, (0, 0), (1024, 60), (30, 30, 30), -1)
+        cv2.putText(dashboard, "VITALSYNC: AUTONOMOUS SIGNAL TRACKING", (20, 40), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
+
+        # Left Context View (We must scale the dynamic box to match the 640x360 mini-display)
+        main_disp = cv2.resize(frame, (640, 360))
+        scaled_cx, scaled_cy = int(cx * 0.5), int(cy * 0.5)
+        
+        # Draw the chasing green box
+        box_color = (0, 255, 0) if target_locked else (0, 0, 255) # Green if locked, Red if searching
+        cv2.rectangle(main_disp, (scaled_cx-75, scaled_cy-37), (scaled_cx+75, scaled_cy+37), box_color, 2)
+        
+        # Add a cool crosshair
+        cv2.drawMarker(main_disp, (scaled_cx, scaled_cy), box_color, cv2.MARKER_CROSS, 15, 1)
+        
+        # Dynamic Text
+        status_text = "[ TARGET LOCKED ]" if target_locked else "[ SEARCHING FOR SIGNAL ]"
+        cv2.putText(main_disp, status_text, (scaled_cx-70, scaled_cy-45), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, box_color, 1)
+
+        dashboard[100:460, 20:660] = main_disp
+        
+        # Right Side - Raw and Processed
+        dashboard[100:250, 700:1000] = crop_roi
+        cv2.putText(dashboard, "LAYER 1: DYNAMIC ROI", (700, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+        dashboard[280:430, 700:1000] = thresh_color
+        cv2.putText(dashboard, "LAYER 2: GLARE SUPPRESSION", (700, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+        # --- 5. LIVE DRAWN GRAPH ---
+        cv2.putText(dashboard, "LAYER 3: TELEMETRY CALCULATION", (700, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        
+        graph_width = 300
+        graph_height = 100
+        cv2.rectangle(dashboard, (700, 470), (700 + graph_width, 470 + graph_height), (20, 20, 20), -1)
+        
+        points = []
+        for i, val in enumerate(bpm_history):
+            x = 700 + int((i / 100) * graph_width)
+            y = 470 + graph_height - int(((val - 40) / 140) * graph_height) 
+            points.append((x, y))
+            
+        for i in range(1, len(points)):
+            cv2.line(dashboard, points[i-1], points[i], (0, 255, 0), 2)
+            
+        if calculated_bpm > 0:
+            cv2.putText(dashboard, f"{calculated_bpm}", (920, 560), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
+            cv2.putText(dashboard, "BPM", (930, 580), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        else:
+            cv2.putText(dashboard, "CALC", (920, 550), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 165, 255), 2)
+
+        cv2.imshow(window_name, dashboard)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
