@@ -1,0 +1,87 @@
+import urllib.request
+import numpy as np
+
+# Download a sample medical monitor image from the internet
+url = "https://media.sciencephoto.com/image/f0170068/800wm/F0170068-Patient_monitor.jpg"
+req = urllib.request.urlopen(url)
+arr = np.asarray(bytearray(req.read()), dtype=np.uint8)
+
+# Read the image using OpenCV
+original_frame = cv2.imdecode(arr, -1)
+
+# Convert from BGR (OpenCV format) to RGB (Matplotlib format)
+frame_rgb = cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)
+
+# Display the simulated camera feed
+plt.figure(figsize=(10,6))
+plt.imshow(frame_rgb)
+plt.title("Simulated Optical Capture (Layer 1)")
+plt.axis('off')
+plt.show()
+
+
+
+from ultralytics import YOLO
+
+# Load a lightweight YOLOv8-nano model (perfect for Jetson Nano)
+model = YOLO('yolov8n.pt') 
+
+# Run inference on our simulated monitor frame
+# (In a real scenario, this finds the numbers. Here it will just find generic objects)
+results = model(frame_rgb)
+
+# Draw the bounding boxes on the image
+annotated_frame = results[0].plot()
+
+plt.figure(figsize=(10,6))
+plt.imshow(annotated_frame)
+plt.title("YOLO Region of Interest Detection")
+plt.axis('off')
+plt.show()
+
+
+# Simulate YOLO cropping out the Heart Rate section (Y1:Y2, X1:X2)
+# We will just take a slice of the top-right of the image for testing
+crop_roi = original_frame[50:200, 400:700] 
+
+# Convert the crop to grayscale for better OCR accuracy
+gray_roi = cv2.cvtColor(crop_roi, cv2.COLOR_BGR2GRAY)
+
+# Apply a binary threshold (simulating your glare-reduction pipeline)
+_, thresh_roi = cv2.threshold(gray_roi, 150, 255, cv2.THRESH_BINARY_INV)
+
+# Run Tesseract OCR on the processed crop
+extracted_text = pytesseract.image_to_string(thresh_roi, config='--psm 6')
+
+print("--- VITAL SIGN EXTRACTION OUTPUT ---")
+print(f"Extracted Raw Data: \n{extracted_text.strip()}")
+
+# Show what the OCR engine actually "saw"
+plt.imshow(cv2.cvtColor(thresh_roi, cv2.COLOR_BGR2RGB))
+plt.title("Processed ROI for OCR")
+plt.axis('off')
+plt.show()
+
+
+
+# Make a copy of the original frame
+secure_frame = original_frame.copy()
+
+# Define a hypothetical area where the Patient Name (PHI) is displayed
+# Format: [y_start:y_end, x_start:x_end]
+phi_region = secure_frame[20:80, 20:300]
+
+# Apply a heavy Gaussian Blur to anonymize the text
+blurred_phi = cv2.GaussianBlur(phi_region, (99, 99), 30)
+
+# Put the blurred region back into the main frame
+secure_frame[20:80, 20:300] = blurred_phi
+
+# Convert to RGB to show in Jupyter
+secure_rgb = cv2.cvtColor(secure_frame, cv2.COLOR_BGR2RGB)
+
+plt.figure(figsize=(10,6))
+plt.imshow(secure_rgb)
+plt.title("PHI Anonymization Module Output (Air-Gapped Privacy)")
+plt.axis('off')
+plt.show()
